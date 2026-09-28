@@ -1,0 +1,28 @@
+# Dependências (reinstaladas no deploy com npm ci)
+node_modules/
+
+# Gerados no build local (não vão p/ nuvem)
+client/dist/
+desktop/dist/
+desktop/app-dist/
+desktop/srv/
+desktop/prisma-client/
+desktop/pg-bin/
+server/prisma-client/
+
+# Uploads e dados locais (não subir!)
+**/uploads/
+server/data.json
+pgdata/
+
+# Segredos locais (a nuvem usa variáveis de ambiente)
+.env
+
+# Logs e temporários
+*.log
+builder-debug.yml
+*.blockmap
+
+# Sistema
+.DS_Store
+Thumbs.db

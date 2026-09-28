@@ -1,0 +1,110 @@
+// Modelo do banco — guia Discordia.txt + extensões (DMs, moderação, anexos)
+// Banco: PostgreSQL (database "discordia", ver .env)
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../prisma-client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  email     String   @unique
+  password  String
+  avatar    String?
+  createdAt DateTime @default(now())
+  members   ServerMember[]
+  messages  Message[]
+  ownedServers Server[] @relation("ServerOwner")
+  dmParts   DMParticipant[]
+  dmMessages DMMessage[]
+}
+
+model Server {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  owner     User     @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members   ServerMember[]
+  channels  Channel[]
+  bans      Ban[]
+  mutes     Mute[]
+  createdAt DateTime @default(now())
+}
+
+model ServerMember {
+  userId   String
+  serverId String
+  role     String   @default("member") // owner | admin | moderator | member
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  server   Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  @@id([userId, serverId])
+}
+
+model Channel {
+  id        String   @id @default(cuid())
+  name      String
+  type      String   @default("text") // text | voice
+  serverId  String
+  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  createdAt DateTime @default(now())
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  content   String   @default("")
+  attachment String?
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  channelId String
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DMThread {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  participants DMParticipant[]
+  messages  DMMessage[]
+}
+
+model DMParticipant {
+  threadId String
+  userId   String
+  thread   DMThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([threadId, userId])
+}
+
+model DMMessage {
+  id        String   @id @default(cuid())
+  threadId  String
+  thread    DMThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  content   String   @default("")
+  attachment String?
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
+
+model Ban {
+  serverId String
+  userId   String
+  at       DateTime @default(now())
+  server   Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  @@id([serverId, userId])
+}
+
+model Mute {
+  serverId String
+  userId   String
+  until    DateTime?
+  server   Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  @@id([serverId, userId])
+}

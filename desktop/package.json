@@ -1,0 +1,53 @@
+{
+  "name": "discordia-desktop",
+  "version": "1.0.0",
+  "description": "Discordia — chat em tempo real com voz, video e compartilhamento de tela",
+  "author": "Discordia",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "predist": "node make-dist.js",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "asar": "^3.2.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.discordia.app",
+    "productName": "Discordia",
+    "icon": "build/icon.ico",
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "boot.js",
+      "package.json",
+      "build/icon.png",
+      "app-dist/**/*",
+      "srv/**/*",
+      "pg-bin/**/*"
+    ],
+    "asarUnpack": [
+      "pg-bin/**/*",
+      "**/*.node"
+    ]
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "@prisma/client-runtime-utils": "^7.10.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.4.0",
+    "pg": "^8.23.0",
+    "socket.io": "^4.8.4"
+  }
+}
