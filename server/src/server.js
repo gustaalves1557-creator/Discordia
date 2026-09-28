@@ -138,12 +138,21 @@ async function seed() {
   await prisma.message.create({ data: { content: 'Bem-vindo ao Discordia! Crie sua conta para conversar em tempo real.', authorId: bot.id, channelId: channel.id } });
 }
 
+// normaliza p/ login e cadastro baterem sempre (teclado de celular põe maiúscula/espaço)
+const normEmail = (e) => (e || '').trim().toLowerCase();
+const normName = (u) => (u || '').trim();
+const normPass = (p) => (p || '').trim();
+
 // ---- AUTH ----
 app.post('/api/auth/register', async (req, res) => {
-  const { username, email, password } = req.body || {};
+  const username = normName(req.body?.username);
+  const email = normEmail(req.body?.email);
+  const password = normPass(req.body?.password);
   if (!username || !email || !password) return res.status(400).json({ error: 'username, email e password sao obrigatorios' });
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Email invalido' });
+  if (password.length < 4) return res.status(400).json({ error: 'Senha muito curta (min 4)' });
   await seed();
-  if (await prisma.user.findUnique({ where: { email } })) return res.status(400).json({ error: 'Email ja cadastrado' });
+  if (await prisma.user.findUnique({ where: { email } })) return res.status(400).json({ error: 'Email ja cadastrado. Tente entrar.' });
   if (await prisma.user.findUnique({ where: { username } })) return res.status(400).json({ error: 'Username ja em uso' });
   const hash = await bcrypt.hash(password, 10);
   const user = await prisma.user.create({ data: { username, email, password: hash } });
@@ -159,12 +168,13 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body || {};
+  const email = normEmail(req.body?.email);
+  const password = normPass(req.body?.password);
   await seed();
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !user.password) return res.status(400).json({ error: 'Credenciais invalidas' });
+  if (!user || !user.password) return res.status(400).json({ error: 'Email nao cadastrado. Crie sua conta.' });
   const ok = await bcrypt.compare(password, user.password);
-  if (!ok) return res.status(400).json({ error: 'Credenciais invalidas' });
+  if (!ok) return res.status(400).json({ error: 'Senha incorreta. Tente de novo.' });
   res.json({ user: publicUser(user), token: sign(user) });
 });
 
@@ -175,7 +185,8 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
 });
 
 app.put('/api/auth/profile', authRequired, async (req, res) => {
-  const { username, avatar } = req.body || {};
+  const username = req.body?.username ? normName(req.body.username) : undefined;
+  const { avatar } = req.body || {};
   try {
     const user = await prisma.user.update({
       where: { id: req.user.id },

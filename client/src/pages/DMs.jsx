@@ -13,6 +13,7 @@ export default function DMs() {
   const [dmId, setDmId] = useState(null);
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
+  const [conn, setConn] = useState('on');
   const socketRef = useRef(null);
   const bottomRef = useRef(null);
 
@@ -37,7 +38,13 @@ export default function DMs() {
       load();
     };
     s.on('dm:new', onDm);
-    return () => { s.off('dm:new', onDm); };
+    const on = () => setConn('on');
+    const off = () => setConn('off');
+    const trying = () => setConn('trying');
+    s.on('connect', on);
+    s.on('disconnect', off);
+    s.on('connect_error', trying);
+    return () => { s.off('dm:new', onDm); s.off('connect', on); s.off('disconnect', off); s.off('connect_error', trying); };
   }, [dmId]);
 
   useEffect(() => {
@@ -101,6 +108,11 @@ export default function DMs() {
           <Hash size={20} /> {active?.other?.username || 'Mensagens diretas'}
           {!dmId && <span className="topic">escolha ou inicie uma conversa</span>}
         </header>
+        {conn !== 'on' && (
+          <div className={`conn-banner ${conn}`}>
+            {conn === 'trying' ? 'Reconectando ao servidor...' : 'Desconectado do servidor. Verifique a conexão.'}
+          </div>
+        )}
         <div className="msgs">
           {!dmId && (
             <div className="empty-state">

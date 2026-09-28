@@ -9,11 +9,15 @@ export default function Register() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
 
   const submit = async (e) => {
-    e.preventDefault(); setErr('');
-    try { await register(username, email, password); nav('/'); }
+    e.preventDefault();
+    if (busy) return;
+    setErr(''); setBusy(true);
+    try { await register(username.trim(), email.trim(), password.trim()); nav('/'); }
     catch (e2) { setErr(e2.message); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -28,7 +32,7 @@ export default function Register() {
         <label>Nome de usuário<input value={username} onChange={(e) => setUsername(e.target.value)} required /></label>
         <label>E-mail<input value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
         <label>Senha<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
-        <button type="submit">Continuar</button>
+        <button type="submit" disabled={busy}>{busy ? 'Criando...' : 'Continuar'}</button>
         <span className="auth-foot"><Link to="/login">Já tem uma conta?</Link></span>
       </form>
     </div>

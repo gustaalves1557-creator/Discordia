@@ -56,6 +56,7 @@ export default function Chat() {
   const [showMembers, setShowMembers] = useState(true);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [voiceMembers, setVoiceMembers] = useState({});
+  const [conn, setConn] = useState('on');
   const [unread, setUnread] = useState(loadUnread());
   const [memberCtx, setMemberCtx] = useState(null); // {x, y, member}
   const [confirm, setConfirm] = useState(null); // {title, message, confirmLabel, danger, action}
@@ -135,6 +136,9 @@ export default function Chat() {
     s.on('category:new', (c) => setCategories((prev) => [...prev, c]));
     s.on('category:delete', (c) => setCategories((prev) => prev.filter((x) => x.id !== c.id)));
     s.on('voice:members', setVoiceMembers);
+    s.on('connect', () => setConn('on'));
+    s.on('disconnect', () => setConn('off'));
+    s.on('connect_error', () => setConn('trying'));
     return () => { if (typingTimer.current) clearTimeout(typingTimer.current); s.disconnect(); closeSocket(); };
   }, []);
 
@@ -486,6 +490,11 @@ export default function Chat() {
           setShowMembers={setShowMembers}
         />
         {showSearch && channel && <SearchBar channelName={channel.name} search={search} setSearch={setSearch} />}
+        {conn !== 'on' && (
+          <div className={`conn-banner ${conn}`}>
+            {conn === 'trying' ? 'Reconectando ao servidor...' : 'Desconectado do servidor. Verifique a conexão.'}
+          </div>
+        )}
         {voiceChannel && sock && (
           <Voice channelId={voiceChannel.id} channelName={voiceChannel.name} socket={sock} onLeave={() => setVoiceChannel(null)} />
         )}

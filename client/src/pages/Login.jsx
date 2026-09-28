@@ -8,11 +8,15 @@ export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
 
   const submit = async (e) => {
-    e.preventDefault(); setErr('');
-    try { await login(email, password); nav('/'); }
+    e.preventDefault();
+    if (busy) return;
+    setErr(''); setBusy(true);
+    try { await login(email.trim(), password.trim()); nav('/'); }
     catch (e2) { setErr(e2.message); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -26,7 +30,7 @@ export default function Login() {
         {err && <div className="error">{err}</div>}
         <label>E-mail<input value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
         <label>Senha<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
-        <button type="submit">Entrar</button>
+        <button type="submit" disabled={busy}>{busy ? 'Entrando...' : 'Entrar'}</button>
         <span className="auth-foot">Precisando de uma conta? <Link to="/register">Registre-se</Link></span>
       </form>
     </div>

@@ -323,6 +323,10 @@ body[data-density="compact"] .msg p { font-size: 14px; }
 .search-box input:focus { outline: none; }
 .search-box svg { color: var(--txt-mute); flex-shrink: 0; }
 .call-badge { display: inline-flex; align-items: center; gap: 5px; background: var(--green); color: #fff; font-size: 12px; font-weight: 700; border-radius: 12px; padding: 3px 10px; white-space: nowrap; }
+/* faixa de conexão */
+.conn-banner { margin: 8px 16px 0; padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; text-align: center; }
+.conn-banner.trying { background: rgba(240, 178, 50, .12); border: 1px solid rgba(240, 178, 50, .4); color: #f5c86e; }
+.conn-banner.off { background: rgba(240, 71, 71, .12); border: 1px solid rgba(240, 71, 71, .4); color: #ff9d9d; }
 
 .msgs { flex: 1; overflow-y: auto; padding: 10px 0 6px; display: flex; flex-direction: column; }
 .day-divider { display: flex; align-items: center; gap: 10px; padding: 10px 16px 4px; color: var(--txt-mute); font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }

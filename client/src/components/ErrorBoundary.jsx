@@ -9,7 +9,7 @@ export default class ErrorBoundary extends Component {
   static getDerivedStateFromError(error) {
     return { error };
   }
-  componentDidCatch(error, info) {
+  componentDidCatch(error, _info) {
     try {
       const msg = `${new Date().toISOString()} PAGE ${this.props.name || ''}: ${error?.stack || error?.message || error}\n`;
       const key = 'discordia_ui_errors';
