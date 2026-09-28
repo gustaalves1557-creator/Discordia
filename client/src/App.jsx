@@ -5,6 +5,7 @@ import Register from './pages/Register';
 import Chat from './pages/Chat';
 import DMs from './pages/DMs';
 import Download from './pages/Download';
+import ErrorBoundary from './components/ErrorBoundary';
 import './App.css';
 
 function Guard({ children }) {
@@ -19,10 +20,10 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
-          <Route path="/" element={<Guard><Chat /></Guard>} />
-          <Route path="/dms" element={<Guard><DMs /></Guard>} />
+          <Route path="/login" element={<ErrorBoundary name="login"><Login /></ErrorBoundary>} />
+          <Route path="/register" element={<ErrorBoundary name="register"><Register /></ErrorBoundary>} />
+          <Route path="/" element={<Guard><ErrorBoundary name="chat"><Chat /></ErrorBoundary></Guard>} />
+          <Route path="/dms" element={<Guard><ErrorBoundary name="dms"><DMs /></ErrorBoundary></Guard>} />
           <Route path="/download" element={<Download />} />
         </Routes>
       </BrowserRouter>

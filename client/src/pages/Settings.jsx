@@ -326,6 +326,14 @@ export default function Settings({ user, onUserChange, onClose, initialTab }) {
               >
                 Apagar e sair
               </button>
+              <label className="set-label">Diagnóstico (últimos erros de tela)
+                <textarea
+                  readOnly
+                  rows={4}
+                  style={{ background: '#101114', color: 'var(--txt-dim)', border: '1px solid var(--line)', borderRadius: 6, padding: 8, fontSize: 11, resize: 'vertical' }}
+                  value={(function () { try { return localStorage.getItem('discordia_ui_errors') || '(nenhum erro registrado)'; } catch { return '(indisponível)'; } })()}
+                />
+              </label>
               <small className="hint">Discordia web v1 • React + Socket.IO + Prisma/Postgres</small>
             </div>
           )}
