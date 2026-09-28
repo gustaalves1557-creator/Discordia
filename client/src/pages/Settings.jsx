@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, User, Mic, Camera, Globe } from 'lucide-react';
+import { X, User, Mic, Camera, Globe, Palette, Bell, ShieldCheck, Keyboard, SlidersHorizontal } from 'lucide-react';
 import { api, uploadFile, getApiUrl, setApiUrl } from '../api';
 import { closeSocket } from '../socket';
+import { getUiSettings, setUiSettings } from '../uiStore';
 import { Avatar } from './Chat';
 import { getVoiceSettings, setVoiceSettings, micMeter } from '../voiceStore';
 
@@ -16,7 +17,14 @@ export default function Settings({ user, onUserChange, onClose, initialTab }) {
   const [level, setLevel] = useState(0);
   const [serverUrl, setServerUrl] = useState(getApiUrl());
   const [connStatus, setConnStatus] = useState('');
+  const [ui, setUi] = useState(getUiSettings());
   const fileRef = useRef(null);
+
+  const patchUi = (p) => {
+    const next = { ...ui, ...p };
+    setUi(next);
+    setUiSettings(p);
+  };
 
   useEffect(() => {
     let alive = true;
@@ -71,8 +79,13 @@ export default function Settings({ user, onUserChange, onClose, initialTab }) {
         <aside className="settings-side">
           <span className="settings-title">Configurações</span>
           <button className={tab === 'conta' ? 'active' : ''} onClick={() => setTab('conta')}><User size={15} /> Minha conta</button>
-          <button className={tab === 'voz' ? 'active' : ''} onClick={() => setTab('voz')}><Mic size={15} /> Voz e vídeo</button>
+          <button className={tab === 'voz' ? 'active' : ''} onClick={() => setTab('voz')}><Mic size={15} /> Voz</button>
           <button className={tab === 'conexao' ? 'active' : ''} onClick={() => setTab('conexao')}><Globe size={15} /> Conexão</button>
+          <button className={tab === 'aparencia' ? 'active' : ''} onClick={() => setTab('aparencia')}><Palette size={15} /> Aparência</button>
+          <button className={tab === 'notif' ? 'active' : ''} onClick={() => setTab('notif')}><Bell size={15} /> Notificações</button>
+          <button className={tab === 'priv' ? 'active' : ''} onClick={() => setTab('priv')}><ShieldCheck size={15} /> Privacidade</button>
+          <button className={tab === 'atalhos' ? 'active' : ''} onClick={() => setTab('atalhos')}><Keyboard size={15} /> Atalhos</button>
+          <button className={tab === 'avancado' ? 'active' : ''} onClick={() => setTab('avancado')}><SlidersHorizontal size={15} /> Avançado</button>
         </aside>
         <main className="settings-main">
           <button className="settings-close" onClick={onClose} title="Fechar"><X size={18} /></button>
@@ -107,7 +120,7 @@ export default function Settings({ user, onUserChange, onClose, initialTab }) {
 
           {tab === 'voz' && (
             <div>
-              <h2>Voz e vídeo</h2>
+              <h2>Voz</h2>
 
               <label className="set-label">Dispositivo de entrada (microfone)
                 <select value={cfg.inputDeviceId} onChange={(e) => patch({ inputDeviceId: e.target.value })}>
@@ -223,6 +236,97 @@ export default function Settings({ user, onUserChange, onClose, initialTab }) {
                 </button>
               </div>
               <small className="hint">Atual: {getApiUrl()}. Trocar de servidor exige login de novo (cada servidor tem suas contas).</small>
+            </div>
+          )}
+
+          {tab === 'aparencia' && (
+            <div>
+              <h2>Aparência</h2>
+              <label className="set-label">Cor de destaque
+                <select value={ui.accent} onChange={(e) => patchUi({ accent: e.target.value })}>
+                  <option value="discordia">Discordia (gradiente)</option>
+                  <option value="blurple">Azul blurple</option>
+                  <option value="green">Verde</option>
+                </select>
+              </label>
+              <label className="set-label">Densidade das mensagens
+                <select value={ui.density} onChange={(e) => patchUi({ density: e.target.value })}>
+                  <option value="comfortable">Confortável</option>
+                  <option value="compact">Compacta</option>
+                </select>
+              </label>
+              <small className="hint">Aplicado na hora em todo o app.</small>
+            </div>
+          )}
+
+          {tab === 'notif' && (
+            <div>
+              <h2>Notificações</h2>
+              <div className="set-row">
+                <div>
+                  <b>Som de mensagem nova</b>
+                  <small>Toca um bip ao receber mensagem de outros canais.</small>
+                </div>
+                <Toggle on={ui.notifSound} onClick={() => patchUi({ notifSound: !ui.notifSound })} />
+              </div>
+              <div className="set-row">
+                <div>
+                  <b>Mostrar "digitando..."</b>
+                  <small>Exibe quando alguém está escrevendo.</small>
+                </div>
+                <Toggle on={ui.showTyping} onClick={() => patchUi({ showTyping: !ui.showTyping })} />
+              </div>
+              <small className="hint">Canais com mensagens não lidas ganham selo na lista e bolinha no servidor.</small>
+            </div>
+          )}
+
+          {tab === 'priv' && (
+            <div>
+              <h2>Privacidade</h2>
+              <div className="set-row">
+                <div>
+                  <b>Enviar meu "digitando..."</b>
+                  <small>Os outros veem quando você está escrevendo.</small>
+                </div>
+                <Toggle on={ui.sendTyping} onClick={() => patchUi({ sendTyping: !ui.sendTyping })} />
+              </div>
+              <small className="hint">Suas conversas ficam no servidor conectado. Troque de servidor na aba Conexão para separar ambientes.</small>
+            </div>
+          )}
+
+          {tab === 'atalhos' && (
+            <div>
+              <h2>Atalhos de teclado</h2>
+              <div className="keys">
+                <div><kbd>Enter</kbd><span>Enviar mensagem</span></div>
+                <div><kbd>Shift</kbd> + <kbd>Enter</kbd><span>Quebra de linha (em breve)</span></div>
+                <div><kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd><span>Trocar de canal de texto</span></div>
+                <div><kbd>Esc</kbd><span>Fechar menus e busca</span></div>
+              </div>
+              <small className="hint">Os atalhos funcionam fora dos campos de texto, exceto o Enter.</small>
+            </div>
+          )}
+
+          {tab === 'avancado' && (
+            <div>
+              <h2>Avançado</h2>
+              <div className="set-row">
+                <div>
+                  <b>Apagar dados locais</b>
+                  <small>Limpa token, preferências e rascunhos deste navegador/app.</small>
+                </div>
+              </div>
+              <button
+                className="primary-btn"
+                onClick={() => {
+                  if (!confirm('Apagar todos os dados locais e sair?')) return;
+                  try { localStorage.clear(); } catch {}
+                  window.location.reload();
+                }}
+              >
+                Apagar e sair
+              </button>
+              <small className="hint">Discordia web v1 • React + Socket.IO + Prisma/Postgres</small>
             </div>
           )}
         </main>

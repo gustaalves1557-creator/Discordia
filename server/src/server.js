@@ -22,7 +22,42 @@ app.use('/uploads', express.static(UPLOAD_DIR));
 const upload = multer({ dest: UPLOAD_DIR, limits: { fileSize: 10 * 1024 * 1024 } });
 
 const publicUser = (u) => ({ id: u.id, username: u.username, email: u.email, avatar: u.avatar || null, createdAt: u.createdAt });
-const withAuthor = (m) => ({ ...m, author: m.author ? { id: m.author.id, username: m.author.username, avatar: m.author.avatar } : null });
+const authorOf = (u) => (u ? { id: u.id, username: u.username, avatar: u.avatar || null } : null);
+const withAuthor = (m) => ({
+  ...m,
+  author: authorOf(m.author),
+  reply: m.replyTo ? { id: m.replyTo.id, content: m.replyTo.content, author: authorOf(m.replyTo.author) } : null,
+  reactions: summarize((m.reactions || [])),
+});
+const summarize = (list) => {
+  const map = {};
+  for (const r of list) {
+    (map[r.emoji] = map[r.emoji] || { emoji: r.emoji, count: 0, users: [] });
+    map[r.emoji].count++;
+    if (r.user) map[r.emoji].users.push({ id: r.user.id, username: r.user.username });
+  }
+  return Object.values(map);
+};
+const MSG_INCLUDE = {
+  author: true,
+  replyTo: { include: { author: true } },
+  reactions: { include: { user: true } },
+};
+async function ensureBot() {
+  let bot = await prisma.user.findUnique({ where: { email: 'bot@discordia.local' } });
+  if (!bot) bot = await prisma.user.create({ data: { username: 'Discordia', email: 'bot@discordia.local', password: '' } });
+  return bot;
+}
+async function systemMsg(channelId, content) {
+  const bot = await ensureBot();
+  const msg = await prisma.message.create({
+    data: { content, system: true, authorId: bot.id, channelId },
+    include: MSG_INCLUDE,
+  });
+  const out = withAuthor(msg);
+  io.to(`channel:${channelId}`).emit('message:new', out);
+  return out;
+}
 
 // ---- seed: importa data.json (modo antigo) ou cria servidor Geral ----
 async function seed() {
@@ -185,11 +220,18 @@ app.post('/api/servers/:id/join', authRequired, async (req, res) => {
   if (await prisma.ban.findUnique({ where: { serverId_userId: { serverId: server.id, userId: req.user.id } } })) {
     return res.status(403).json({ error: 'Voce foi banido deste servidor' });
   }
+  const existed = await prisma.serverMember.findUnique({
+    where: { userId_serverId: { userId: req.user.id, serverId: server.id } },
+  });
   await prisma.serverMember.upsert({
     where: { userId_serverId: { userId: req.user.id, serverId: server.id } },
     update: {},
     create: { userId: req.user.id, serverId: server.id, role: 'member' },
   });
+  if (!existed) {
+    const first = await prisma.channel.findFirst({ where: { serverId: server.id, type: 'text' }, orderBy: { createdAt: 'asc' } });
+    if (first) systemMsg(first.id, `${req.user.username} entrou no servidor.`).catch(() => {});
+  }
   res.json(server);
 });
 
@@ -206,21 +248,64 @@ app.delete('/api/servers/:id', authRequired, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.put('/api/servers/:id', authRequired, async (req, res) => {
+  const server = await prisma.server.findUnique({ where: { id: req.params.id } });
+  if (!server) return res.status(404).json({ error: 'Servidor nao encontrado' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'So o dono pode renomear' });
+  const { name } = req.body || {};
+  if (!name?.trim()) return res.status(400).json({ error: 'Nome obrigatorio' });
+  res.json(await prisma.server.update({ where: { id: server.id }, data: { name: name.trim() } }));
+});
+
 app.get('/api/servers/:id/members', authRequired, async (req, res) => {
   const members = await prisma.serverMember.findMany({ where: { serverId: req.params.id }, include: { user: true } });
   res.json(members.map((m) => ({ userId: m.userId, serverId: m.serverId, role: m.role, username: m.user.username, avatar: m.user.avatar })));
 });
 
-// ---- CHANNELS ----
+// ---- CHANNELS + CATEGORIES ----
 app.get('/api/servers/:id/channels', authRequired, async (req, res) => {
-  res.json(await prisma.channel.findMany({ where: { serverId: req.params.id } }));
+  res.json(await prisma.channel.findMany({
+    where: { serverId: req.params.id },
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+  }));
+});
+
+app.get('/api/servers/:id/categories', authRequired, async (req, res) => {
+  res.json(await prisma.channelCategory.findMany({
+    where: { serverId: req.params.id },
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+  }));
+});
+
+app.post('/api/servers/:id/categories', authRequired, async (req, res) => {
+  const { name } = req.body || {};
+  if (!name?.trim()) return res.status(400).json({ error: 'Nome obrigatorio' });
+  const cat = await prisma.channelCategory.create({ data: { name: name.trim(), serverId: req.params.id } });
+  io.to(`server:${req.params.id}`).emit('category:new', cat);
+  res.json(cat);
+});
+
+app.delete('/api/categories/:id', authRequired, async (req, res) => {
+  const cat = await prisma.channelCategory.findUnique({ where: { id: req.params.id } });
+  if (!cat) return res.status(404).json({ error: 'Categoria nao encontrada' });
+  await prisma.channelCategory.delete({ where: { id: cat.id } });
+  io.to(`server:${cat.serverId}`).emit('category:delete', cat);
+  res.json({ ok: true });
 });
 
 app.post('/api/servers/:id/channels', authRequired, async (req, res) => {
-  const { name, type } = req.body || {};
+  const { name, type, categoryId } = req.body || {};
   if (!name) return res.status(400).json({ error: 'Nome obrigatorio' });
-  const ch = await prisma.channel.create({ data: { name, type: type === 'voice' ? 'voice' : 'text', serverId: req.params.id } });
+  const ch = await prisma.channel.create({
+    data: {
+      name,
+      type: type === 'voice' ? 'voice' : 'text',
+      serverId: req.params.id,
+      ...(categoryId ? { categoryId } : {}),
+    },
+  });
   io.to(`server:${req.params.id}`).emit('channel:new', ch);
+  if (ch.type === 'text') systemMsg(ch.id, `Canal #${ch.name} criado.`).catch(() => {});
   res.json(ch);
 });
 
@@ -236,7 +321,7 @@ app.delete('/api/channels/:id', authRequired, async (req, res) => {
 app.get('/api/channels/:id/messages', authRequired, async (req, res) => {
   const msgs = await prisma.message.findMany({
     where: { channelId: req.params.id },
-    include: { author: true },
+    include: MSG_INCLUDE,
     orderBy: { createdAt: 'asc' },
     take: -100,
   });
@@ -244,15 +329,21 @@ app.get('/api/channels/:id/messages', authRequired, async (req, res) => {
 });
 
 app.post('/api/channels/:id/messages', authRequired, async (req, res) => {
-  const { content, attachment } = req.body || {};
+  const { content, attachment, replyToId } = req.body || {};
   if (!content && !attachment) return res.status(400).json({ error: 'Conteudo obrigatorio' });
   const ch = await prisma.channel.findUnique({ where: { id: req.params.id } });
   if (!ch) return res.status(404).json({ error: 'Canal nao encontrado' });
   const mute = await prisma.mute.findUnique({ where: { serverId_userId: { serverId: ch.serverId, userId: req.user.id } } });
   if (mute && (!mute.until || mute.until > new Date())) return res.status(403).json({ error: 'Voce esta silenciado neste servidor' });
   const msg = await prisma.message.create({
-    data: { content: content || '', attachment: attachment || null, authorId: req.user.id, channelId: req.params.id },
-    include: { author: true },
+    data: {
+      content: content || '',
+      attachment: attachment || null,
+      authorId: req.user.id,
+      channelId: req.params.id,
+      ...(replyToId ? { replyToId } : {}),
+    },
+    include: MSG_INCLUDE,
   });
   const out = withAuthor(msg);
   io.to(`channel:${req.params.id}`).emit('message:new', out);
@@ -263,9 +354,11 @@ app.put('/api/messages/:id', authRequired, async (req, res) => {
   const msg = await prisma.message.findUnique({ where: { id: req.params.id } });
   if (!msg) return res.status(404).json({ error: 'Mensagem nao encontrada' });
   if (msg.authorId !== req.user.id) return res.status(403).json({ error: 'So o autor pode editar' });
-  const updated = await prisma.message.update({ where: { id: msg.id }, data: { content: req.body.content || msg.content } });
-  io.to(`channel:${msg.channelId}`).emit('message:update', updated);
-  res.json(updated);
+  await prisma.message.update({ where: { id: msg.id }, data: { content: req.body.content || msg.content } });
+  const full = await prisma.message.findUnique({ where: { id: msg.id }, include: MSG_INCLUDE });
+  const out = withAuthor(full);
+  io.to(`channel:${msg.channelId}`).emit('message:update', out);
+  res.json(out);
 });
 
 app.delete('/api/messages/:id', authRequired, async (req, res) => {
@@ -275,6 +368,29 @@ app.delete('/api/messages/:id', authRequired, async (req, res) => {
   await prisma.message.delete({ where: { id: msg.id } });
   io.to(`channel:${msg.channelId}`).emit('message:delete', msg);
   res.json({ ok: true });
+});
+
+// ---- REACTIONS ----
+async function emitMessage(channelId, id) {
+  const full = await prisma.message.findUnique({ where: { id }, include: MSG_INCLUDE });
+  if (full) io.to(`channel:${channelId}`).emit('message:update', withAuthor(full));
+}
+
+app.post('/api/messages/:id/reactions', authRequired, async (req, res) => {
+  const { emoji } = req.body || {};
+  if (!emoji) return res.status(400).json({ error: 'Emoji obrigatorio' });
+  const msg = await prisma.message.findUnique({ where: { id: req.params.id } });
+  if (!msg) return res.status(404).json({ error: 'Mensagem nao encontrada' });
+  const existing = await prisma.messageReaction.findUnique({
+    where: { messageId_emoji_userId: { messageId: msg.id, emoji, userId: req.user.id } },
+  });
+  if (existing) {
+    await prisma.messageReaction.delete({ where: { messageId_emoji_userId: { messageId: msg.id, emoji, userId: req.user.id } } });
+  } else {
+    await prisma.messageReaction.create({ data: { messageId: msg.id, emoji, userId: req.user.id } });
+  }
+  await emitMessage(msg.channelId, msg.id);
+  res.json({ ok: true, added: !existing });
 });
 
 // ---- UPLOAD ----
@@ -390,6 +506,11 @@ app.delete('/api/servers/:id/mute/:userId', authRequired, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/servers/:id/mutes', authRequired, async (req, res) => {
+  if (!(await canModerate(req.params.id, req.user.id))) return res.status(403).json({ error: 'Sem permissao' });
+  res.json(await prisma.mute.findMany({ where: { serverId: req.params.id } }));
+});
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.get('/api/db-status', authRequired, async (req, res) => {
@@ -401,6 +522,14 @@ app.get('/api/db-status', authRequired, async (req, res) => {
   } catch (e) {
     res.status(500).json({ db: 'postgres', connected: false, error: e.message });
   }
+});
+
+// erros sempre em JSON (o frontend espera { error })
+app.use((req, res) => res.status(404).json({ error: 'Não encontrado' }));
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({ error: err.message || 'Erro interno' });
 });
 
 // ---- SOCKET.IO ----
@@ -472,6 +601,13 @@ io.on('connection', (socket) => {
   });
   socket.on('voice:signal', ({ to, data }) => {
     io.to(to).emit('voice:signal', { from: socket.id, userId: id, username, data });
+  });
+  // ping: mede latência até o servidor; stats: compartilha com a sala
+  socket.on('voice:ping', ({ t }) => {
+    socket.emit('voice:pong', { t });
+  });
+  socket.on('voice:stats', ({ channelId, ping }) => {
+    socket.to(`voice:${channelId}`).emit('voice:peer-stats', { socketId: socket.id, userId: id, ping });
   });
   socket.on('disconnect', () => {
     online.delete(id);

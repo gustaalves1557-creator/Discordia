@@ -11,6 +11,15 @@ try {
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
+function fileLog(msg) {
+  try {
+    require('fs').appendFileSync(
+      require('path').join(app.getPath('userData'), 'boot-error.log'),
+      new Date().toISOString() + ' ' + msg + '\n'
+    );
+  } catch {}
+}
+
 let backend = null;
 let quitting = false;
 let mainWin = null;
@@ -111,6 +120,28 @@ app.on('second-instance', () => {
   if (w) { if (w.isMinimized()) w.restore(); w.focus(); }
 });
 
+app.on('child-process-gone', (e, details) => {
+  try {
+    require('fs').appendFileSync(
+      require('path').join(app.getPath('userData'), 'boot-error.log'),
+      new Date().toISOString() + ` CHILD-GONE type=${details?.type} reason=${details?.reason} exitCode=${details?.exitCode}\n`
+    );
+  } catch {}
+});
+
+// erros JS do renderer (via preload) caem no log
+try {
+  const { ipcMain } = require('electron');
+  ipcMain.on('renderer-error', (e, msg) => {
+    try {
+      require('fs').appendFileSync(
+        require('path').join(app.getPath('userData'), 'boot-error.log'),
+        new Date().toISOString() + ' RENDERER ' + String(msg).slice(0, 500) + '\n'
+      );
+    } catch {}
+  });
+} catch {}
+
 app.whenReady().then(async () => {
   setupPermissions();
   const sp = splash();
@@ -126,7 +157,14 @@ app.whenReady().then(async () => {
     const win = mainWindow();
     mainWin = win;
     sp.close();
-    win.on('closed', () => { if (process.platform !== 'darwin') app.quit(); });
+    win.webContents.on('render-process-gone', (e, details) => {
+      fileLog(`RENDER-GONE reason=${details?.reason} exitCode=${details?.exitCode}`);
+    });
+    win.on('unresponsive', () => fileLog('WINDOW unresponsive'));
+    win.on('closed', () => {
+      fileLog('WINDOW closed');
+      if (process.platform !== 'darwin') app.quit();
+    });
   } catch (e) {
     sp.close();
     try {

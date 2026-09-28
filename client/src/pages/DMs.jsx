@@ -19,6 +19,13 @@ export default function DMs() {
   const load = async () => {
     setThreads(await api('/api/dms'));
     setUsers(await api('/api/users'));
+    try {
+      const open = localStorage.getItem('discordia_open_dm');
+      if (open) {
+        localStorage.removeItem('discordia_open_dm');
+        setDmId(open);
+      }
+    } catch {}
   };
   useEffect(() => { load(); }, []);
 

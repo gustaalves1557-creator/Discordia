@@ -19,6 +19,7 @@ model User {
   createdAt DateTime @default(now())
   members   ServerMember[]
   messages  Message[]
+  reactions MessageReaction[]
   ownedServers Server[] @relation("ServerOwner")
   dmParts   DMParticipant[]
   dmMessages DMMessage[]
@@ -31,6 +32,7 @@ model Server {
   owner     User     @relation("ServerOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   members   ServerMember[]
   channels  Channel[]
+  categories ChannelCategory[]
   bans      Ban[]
   mutes     Mute[]
   createdAt DateTime @default(now())
@@ -51,7 +53,20 @@ model Channel {
   type      String   @default("text") // text | voice
   serverId  String
   server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  categoryId String?
+  category  ChannelCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  position  Int      @default(0)
   messages  Message[]
+  createdAt DateTime @default(now())
+}
+
+model ChannelCategory {
+  id        String   @id @default(cuid())
+  name      String
+  serverId  String
+  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  position  Int      @default(0)
+  channels  Channel[]
   createdAt DateTime @default(now())
 }
 
@@ -59,12 +74,27 @@ model Message {
   id        String   @id @default(cuid())
   content   String   @default("")
   attachment String?
+  system    Boolean  @default(false)
   authorId  String
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   channelId String
   channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  replyToId String?
+  replyTo   Message? @relation("Replies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   Message[] @relation("Replies")
+  reactions MessageReaction[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model MessageReaction {
+  messageId String
+  emoji     String
+  userId    String
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  @@id([messageId, emoji, userId])
 }
 
 model DMThread {

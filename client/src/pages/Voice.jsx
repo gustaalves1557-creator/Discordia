@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, Video, VideoOff, MonitorUp, MonitorOff, Volume2, VolumeX, PhoneOff, Maximize2, Minimize2 } from 'lucide-react';
+import { Mic, MicOff, MonitorUp, MonitorOff, Volume2, VolumeX, PhoneOff, Maximize2, Minimize2, Headphones } from 'lucide-react';
 import { getVoiceSettings, subscribeVoiceSettings, micMeter } from '../voiceStore';
 import { Avatar } from './Chat';
 
-// Sala de voz/video/tela via WebRTC mesh + Socket.IO signaling.
+// Sala de voz + compartilhamento de tela (sem câmera) via WebRTC mesh.
 // - Maior socket.id inicia a oferta (sem glare)
 // - Mic com ganho + gate de sensibilidade + medidor
-// - Filtros (ruído/eco/agc) e troca de microfone sem sair da call
-// - H.264 (HW) ou perfil econômico p/ a tela
-// - Apresentação: palco grande + trilho de câmeras (estilo Discord)
+// - Ping de cada pessoa medido e compartilhado na sala
 const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 function preferCodec(pc, hwOn) {
@@ -50,17 +48,6 @@ async function tuneScreenSender(sender, track, hwOn) {
   } catch {}
 }
 
-async function untuneSender(sender) {
-  try {
-    const params = sender.getParameters();
-    if (!params.encodings?.length) return;
-    params.degradationPreference = 'balanced';
-    delete params.encodings[0].maxBitrate;
-    delete params.encodings[0].maxFramerate;
-    await sender.setParameters(params);
-  } catch {}
-}
-
 function audioConstraints(cfg) {
   return {
     deviceId: cfg.inputDeviceId ? { exact: cfg.inputDeviceId } : undefined,
@@ -70,25 +57,34 @@ function audioConstraints(cfg) {
   };
 }
 
+export function Ping({ ms }) {
+  if (ms == null) return <span className="ping p-unknown">--</span>;
+  const cls = ms < 150 ? 'p-good' : ms < 300 ? 'p-mid' : 'p-bad';
+  return <span className={`ping ${cls}`}>{ms}ms</span>;
+}
+
 export default function Voice({ channelId, channelName, socket, onLeave }) {
-  const [peers, setPeers] = useState({});
+  const [peers, setPeers] = useState({}); // socketId -> { username, streams: [], muted, sharing, volume, ping }
   const [muted, setMuted] = useState(false);
-  const [camOff, setCamOff] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [micVol, setMicVol] = useState(100);
   const [status, setStatus] = useState('Conectando...');
   const [mediaNote, setMediaNote] = useState('');
   const [hw, setHw] = useState(null);
-  const [hasCam, setHasCam] = useState(true);
+  const [ownPing, setOwnPing] = useState(null);
+  const [hasMic, setHasMic] = useState(true);
   const [outputDeviceId, setOutputDeviceId] = useState(getVoiceSettings().outputDeviceId || '');
-  const [shareSources, setShareSources] = useState(null); // modal de escolha (app desktop)
-  const [fsId, setFsId] = useState(null); // chave do palco em tela cheia
+  const [shareSources, setShareSources] = useState(null);
+  const [fsId, setFsId] = useState(null);
+  const [ctxMenu, setCtxMenu] = useState(null);
+  const [deafened, setDeafened] = useState(false);
+  const [speakingSelf, setSpeakingSelf] = useState(false);
+  const [speakingPeers, setSpeakingPeers] = useState({});
   const shareResolve = useRef(null);
   const stageBoxRefs = useRef({});
-  const localRef = useRef(null);
-  const screenPrevRef = useRef(null);
-  const streamRef = useRef(null);
-  const screenRef = useRef(null);
+  const streamRef = useRef(null); // só áudio
+  const screenRef = useRef(null); // tela
+  const screenPrevRef = useRef(null); // prévia da própria tela
   const audioCtxRef = useRef(null);
   const gainRef = useRef(null);
   const srcRef = useRef(null);
@@ -99,10 +95,14 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
   const pcs = useRef({});
   const names = useRef({});
   const myId = useRef(null);
+  const prevVolsRef = useRef(null);
+  const prevMutedRef = useRef(false);
+  const peerAnalysers = useRef({});
+  const analysisCtxRef = useRef(null);
 
   const patchPeer = (sid, patch) => {
     setPeers((prev) => {
-      const cur = prev[sid] || { username: names.current[sid] || '?', streams: [], muted: false, sharing: false, volume: 1 };
+      const cur = prev[sid] || { username: names.current[sid] || '?', streams: [], muted: false, sharing: false, volume: 1, ping: null };
       return { ...prev, [sid]: { ...cur, ...patch } };
     });
   };
@@ -110,6 +110,8 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
   useEffect(() => {
     let dead = false;
     let meterTimer = null;
+    let pingTimer = null;
+    let speakTimer = null;
     let gateSmooth = 1;
     myId.current = socket.id;
     const cfg0 = getVoiceSettings();
@@ -117,41 +119,21 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
 
     const remember = (sid, username) => {
       if (username) names.current[sid] = username;
-      setPeers((prev) => (prev[sid] ? prev : { ...prev, [sid]: { username: names.current[sid] || '?', streams: [], muted: false, sharing: false, volume: 1 } }));
+      setPeers((prev) => (prev[sid] ? prev : { ...prev, [sid]: { username: names.current[sid] || '?', streams: [], muted: false, sharing: false, volume: 1, ping: null } }));
     };
 
     const ensurePC = (peerId) => {
       if (pcs.current[peerId]) return pcs.current[peerId];
       const pc = new RTCPeerConnection(ICE);
       pcs.current[peerId] = pc;
-      const s = streamRef.current;
-      const kinds = new Set();
-      if (s) {
-        s.getVideoTracks().forEach((t) => { pc.addTrack(t, s); kinds.add('video'); });
-      }
       const mic = micTrackRef.current;
       if (mic) {
         pc.addTrack(mic, mic._stream || undefined);
-        kinds.add('audio');
-      } else if (s?.getAudioTracks().length) {
-        s.getAudioTracks().forEach((t) => pc.addTrack(t, s));
-        kinds.add('audio');
+      } else {
+        try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch {}
       }
-      // voz com prioridade e bitrate cheio (Opus até 64 kbps, sem fome de banda)
-      const asender = pc.getSenders().find((x) => x.track?.kind === 'audio');
-      if (asender) {
-        (async () => {
-          try {
-            const p = asender.getParameters();
-            if (!p.encodings?.length) p.encodings = [{}];
-            p.encodings[0].maxBitrate = 64000;
-            p.encodings[0].priority = 'high';
-            await asender.setParameters(p);
-          } catch {}
-        })();
-      }
-      if (!kinds.has('audio')) { try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch {} }
-      if (!kinds.has('video')) { try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch {} }
+      // vídeo só recebe (telas compartilhadas); nunca enviamos câmera
+      try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch {}
       const sc = screenRef.current;
       if (sc) sc.getTracks().forEach((t) => pc.addTrack(t, sc));
       preferCodec(pc, getVoiceSettings().hwAccel !== false);
@@ -164,8 +146,23 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
         stream.getTracks().forEach((t) => {
           t.onunmute = () => setPeers((prev) => ({ ...prev }));
         });
+        // analisador p/ indicador "falando"
+        try {
+          let actx = audioCtxRef.current || analysisCtxRef.current;
+          if (!actx) {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (AC) { actx = new AC(); analysisCtxRef.current = actx; }
+          }
+          if (actx) {
+            const rsrc = actx.createMediaStreamSource(stream);
+            const ran = actx.createAnalyser();
+            ran.fftSize = 512;
+            rsrc.connect(ran);
+            peerAnalysers.current[peerId] = { analyser: ran, buf: new Uint8Array(ran.fftSize), src: rsrc };
+          }
+        } catch {}
         setPeers((prev) => {
-          const cur = prev[peerId] || { username: names.current[peerId] || '?', streams: [], muted: false, sharing: false, volume: 1 };
+          const cur = prev[peerId] || { username: names.current[peerId] || '?', streams: [], muted: false, sharing: false, volume: 1, ping: null };
           if (cur.streams.some((x) => x.id === stream.id)) return prev;
           return { ...prev, [peerId]: { ...cur, streams: [...cur.streams, stream] } };
         });
@@ -184,12 +181,7 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
     const callPeer = async (peerId) => {
       try {
         const pc = ensurePC(peerId);
-        const hasAudio = pc.getSenders().some((x) => x.track?.kind === 'audio');
-        const hasVideo = pc.getSenders().some((x) => x.track?.kind === 'video');
-        const offer = await pc.createOffer({
-          offerToReceiveAudio: !hasAudio,
-          offerToReceiveVideo: !hasVideo,
-        });
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
         socket.emit('voice:signal', { to: peerId, data: pc.localDescription });
       } catch {}
@@ -236,12 +228,21 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       try { pcs.current[socketId]?.close(); } catch {}
       delete pcs.current[socketId];
       delete names.current[socketId];
+      try { peerAnalysers.current[socketId]?.src.disconnect(); } catch {}
+      delete peerAnalysers.current[socketId];
+      setSpeakingPeers((prev) => { const n = { ...prev }; delete n[socketId]; return n; });
       setPeers((prev) => { const n = { ...prev }; delete n[socketId]; return n; });
     };
     const onPeerMute = ({ socketId, muted: m }) => patchPeer(socketId, { muted: m });
     const onPeerSharing = ({ socketId, sharing: sh }) => patchPeer(socketId, { sharing: sh });
+    const onPong = ({ t }) => {
+      if (dead || typeof t !== 'number') return;
+      const rtt = Date.now() - t;
+      setOwnPing(rtt);
+      try { socket.emit('voice:stats', { channelId, ping: rtt }); } catch {}
+    };
+    const onPeerStats = ({ socketId, ping }) => patchPeer(socketId, { ping });
 
-    // medidor + gate de sensibilidade com hangover (não picota a fala)
     function startMeter(ctx, analyser) {
       const buf = new Uint8Array(analyser.fftSize);
       let lastVoice = 0;
@@ -256,12 +257,15 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
           }
           const lvl = Math.min(100, Math.round(Math.sqrt(sum / buf.length) * 300));
           micMeter.level = mutedRef.current ? 0 : lvl;
+          setSpeakingSelf((prev) => {
+            const v = !mutedRef.current && lvl > (cfg.sensThreshold || 0) + 8;
+            return prev === v ? prev : v;
+          });
           const cfg = getVoiceSettings();
           const now = Date.now();
           if (lvl >= (cfg.sensThreshold || 0)) lastVoice = now;
           let target = Math.max(0, Math.min(2, micVolRef.current / 100));
           if (mutedRef.current) target = 0;
-          // gate só fecha 350ms depois do silêncio (evita cortar fim de frase)
           else if (cfg.autoSens && now - lastVoice > 350) target = 0;
           gateSmooth += (target - gateSmooth) * 0.35;
           if (gainRef.current) gainRef.current.gain.value = gateSmooth;
@@ -288,7 +292,6 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       startMeter(ctx, analyser);
     }
 
-    // troca de microfone / filtros sem sair da call
     async function applyAudioInput(cfg) {
       try {
         const ns = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints(cfg) });
@@ -309,18 +312,10 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
           src.connect(analyserRef.current);
           srcRef.current = src;
         }
-        if (localRef.current && s) localRef.current.srcObject = s;
         setMediaNote('');
+        setHasMic(true);
       } catch {
         if (!dead) setMediaNote('Não foi possível trocar o microfone/filtro.');
-      }
-    }
-
-    async function applyScreenProfile(hwOn) {
-      for (const pc of Object.values(pcs.current)) {
-        const sc = screenRef.current;
-        const sender = sc && pc.getSenders().find((x) => sc.getVideoTracks().includes(x.track));
-        if (sender) await tuneScreenSender(sender, sender.track, hwOn);
       }
     }
 
@@ -335,8 +330,12 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       ) {
         applyAudioInput(next);
       }
-      if (next.hwAccel !== prev.hwAccel) {
-        applyScreenProfile(next.hwAccel !== false);
+      if (next.hwAccel !== prev.hwAccel && screenRef.current) {
+        for (const pc of Object.values(pcs.current)) {
+          const sc = screenRef.current;
+          const sender = sc && pc.getSenders().find((x) => sc.getVideoTracks().includes(x.track));
+          if (sender) tuneScreenSender(sender, sender.track, next.hwAccel !== false);
+        }
       }
     });
 
@@ -347,26 +346,23 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       socket.on('voice:peer-leave', onPeerLeave);
       socket.on('voice:peer-mute', onPeerMute);
       socket.on('voice:peer-sharing', onPeerSharing);
+      socket.on('voice:pong', onPong);
+      socket.on('voice:peer-stats', onPeerStats);
 
       const cfg = getVoiceSettings();
       let stream = null;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints(cfg), video: true });
+        stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints(cfg) });
       } catch {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints(cfg), video: false });
-          if (!dead) setMediaNote('Sem câmera: você está só com voz.');
-        } catch {
-          if (!dead) {
-            setMediaNote('Sem microfone/câmera: você entrou só ouvindo/vendo. Libere a permissão para falar.');
-            setStatus('Na chamada (só recebendo)');
-          }
+        if (!dead) {
+          setMediaNote('Sem microfone: você entrou só ouvindo. Libere a permissão para falar.');
+          setStatus('Na chamada (só ouvindo)');
+          setHasMic(false);
         }
       }
       if (dead) { stream?.getTracks().forEach((t) => t.stop()); return; }
-      if (stream) {
+      if (stream?.getAudioTracks().length) {
         streamRef.current = stream;
-        if (!dead) setHasCam(stream.getVideoTracks().length > 0);
         try {
           const AC = window.AudioContext || window.webkitAudioContext;
           const ctx = new AC();
@@ -374,16 +370,45 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
           audioCtxRef.current = ctx;
           buildGraph(ctx, stream);
         } catch {}
-        if (localRef.current) localRef.current.srcObject = stream;
+      } else if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        if (!dead) setHasMic(false);
       }
 
       socket.emit('voice:join', { channelId, muted: false });
+      // mede o ping a cada 3s
+      pingTimer = setInterval(() => {
+        if (dead) return;
+        try { socket.emit('voice:ping', { t: Date.now() }); } catch {}
+      }, 3000);
+      try { socket.emit('voice:ping', { t: Date.now() }); } catch {}
+      // indicador "falando" dos outros (4x por segundo)
+      speakTimer = setInterval(() => {
+        if (dead) return;
+        const next = {};
+        for (const [sid, a] of Object.entries(peerAnalysers.current)) {
+          try {
+            a.analyser.getByteTimeDomainData(a.buf);
+            let sum = 0;
+            for (let i = 0; i < a.buf.length; i++) {
+              const v = (a.buf[i] - 128) / 128;
+              sum += v * v;
+            }
+            next[sid] = Math.sqrt(sum / a.buf.length) > 0.06;
+          } catch {}
+        }
+        setSpeakingPeers((prev) => {
+          const keys = new Set([...Object.keys(prev), ...Object.keys(next)]);
+          for (const k of keys) if (!!prev[k] !== !!next[k]) return next;
+          return prev;
+        });
+      }, 250);
       if (!dead) setStatus((s) => (s === 'Conectando...' ? 'Na chamada' : s));
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setStatus('Erro');
-      setMediaNote('Este navegador não suporta voz/vídeo (use Chrome/Edge ou o app desktop).');
+      setMediaNote('Este navegador não suporta voz (use Chrome/Edge ou o app desktop).');
     } else {
       init();
     }
@@ -392,7 +417,13 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       dead = true;
       unsub();
       if (meterTimer) clearInterval(meterTimer);
+      if (pingTimer) clearInterval(pingTimer);
+      if (speakTimer) clearInterval(speakTimer);
       micMeter.level = 0;
+      for (const a of Object.values(peerAnalysers.current)) { try { a.src.disconnect(); } catch {} }
+      peerAnalysers.current = {};
+      try { analysisCtxRef.current?.close(); } catch {}
+      analysisCtxRef.current = null;
       try { socket.emit('voice:leave', { channelId }); } catch {}
       socket.off('voice:peers', onPeers);
       socket.off('voice:peer-join', onPeerJoin);
@@ -400,6 +431,8 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       socket.off('voice:peer-leave', onPeerLeave);
       socket.off('voice:peer-mute', onPeerMute);
       socket.off('voice:peer-sharing', onPeerSharing);
+      socket.off('voice:pong', onPong);
+      socket.off('voice:peer-stats', onPeerStats);
       Object.values(pcs.current).forEach((pc) => { try { pc.close(); } catch {} });
       pcs.current = {};
       names.current = {};
@@ -444,32 +477,6 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
     }
   }, [sharing]);
 
-  // garante a prévia local sempre anexada (trocar de layout remonta o <video>)
-  useEffect(() => {
-    if (localRef.current && streamRef.current && localRef.current.srcObject !== streamRef.current) {
-      localRef.current.srcObject = streamRef.current;
-    }
-  });
-
-  const toggleMute = () => {
-    const next = !muted;
-    mutedRef.current = next;
-    const raw = streamRef.current?.getAudioTracks()[0];
-    if (raw) raw.enabled = !next;
-    setMuted(next);
-    try { socket.emit('voice:mute', { channelId, muted: next }); } catch {}
-  };
-  const toggleCam = () => {
-    const s = streamRef.current;
-    if (!s?.getVideoTracks().length) return;
-    s.getVideoTracks().forEach((t) => (t.enabled = camOff));
-    setCamOff(!camOff);
-  };
-  const changeMicVol = (v) => {
-    setMicVol(v);
-    micVolRef.current = v;
-  };
-
   // tela cheia no palco (botão ou Esc para sair)
   useEffect(() => {
     const onFs = () => {
@@ -489,6 +496,42 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
         if (el?.requestFullscreen) await el.requestFullscreen();
       }
     } catch {}
+  };
+
+  const toggleMute = () => {
+    const next = !muted;
+    mutedRef.current = next;
+    const raw = streamRef.current?.getAudioTracks()[0];
+    if (raw) raw.enabled = !next;
+    setMuted(next);
+    try { socket.emit('voice:mute', { channelId, muted: next }); } catch {}
+  };
+  // surdez: zera todo mundo + muta o mic; ao sair, restaura
+  const toggleDeafen = () => {
+    if (!deafened) {
+      prevVolsRef.current = Object.fromEntries(Object.entries(peers).map(([sid, p]) => [sid, p.volume]));
+      prevMutedRef.current = mutedRef.current;
+      setPeers((prev) => {
+        const n = {};
+        for (const [sid, p] of Object.entries(prev)) n[sid] = { ...p, volume: 0 };
+        return n;
+      });
+      if (!mutedRef.current) toggleMute();
+      setDeafened(true);
+    } else {
+      const pv = prevVolsRef.current || {};
+      setPeers((prev) => {
+        const n = { ...prev };
+        for (const sid of Object.keys(pv)) if (n[sid]) n[sid] = { ...n[sid], volume: pv[sid] };
+        return n;
+      });
+      if (!prevMutedRef.current && mutedRef.current) toggleMute();
+      setDeafened(false);
+    }
+  };
+  const changeMicVol = (v) => {
+    setMicVol(v);
+    micVolRef.current = v;
   };
 
   // seletor próprio (app desktop): modal com miniaturas, sem mensagem do sistema
@@ -519,7 +562,7 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       let sc;
       if (isDesktop) {
         const picked = await pickDesktopSource();
-        if (!picked) return; // cancelou no seletor
+        if (!picked) return;
         sc = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: {
@@ -541,11 +584,10 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
       const track = sc.getVideoTracks()[0];
       const hwOn = getVoiceSettings().hwAccel !== false;
       for (const pc of Object.values(pcs.current)) {
-        const sender = pc.getSenders().find((x) => x.track?.kind === 'video');
         try {
-          if (sender) { await sender.replaceTrack(track); pc._screenReplaced = true; }
-          else { pc.addTrack(track, sc); pc._screenAdded = true; }
-          await tuneScreenSender(sender || pc.getSenders().find((x) => x.track === track), track, hwOn);
+          pc.addTrack(track, sc);
+          const sender = pc.getSenders().find((x) => x.track === track);
+          if (sender) await tuneScreenSender(sender, track, hwOn);
         } catch {}
       }
       track.onended = () => stopShare();
@@ -559,19 +601,11 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
     const sc = screenRef.current;
     screenRef.current = null;
     sc?.getTracks().forEach((t) => t.stop());
-    const cam = streamRef.current?.getVideoTracks()[0];
     for (const pc of Object.values(pcs.current)) {
       try {
-        if (pc._screenAdded) {
-          pc.getSenders()
-            .filter((x) => sc?.getVideoTracks().includes(x.track))
-            .forEach((sender) => { try { pc.removeTrack(sender); } catch {} });
-          pc._screenAdded = false;
-        } else if (pc._screenReplaced && cam) {
-          const vSender = pc.getSenders().find((x) => x.track?.kind === 'video');
-          if (vSender) { await vSender.replaceTrack(cam); await untuneSender(vSender); }
-          pc._screenReplaced = false;
-        }
+        pc.getSenders()
+          .filter((x) => sc?.getVideoTracks().includes(x.track))
+          .forEach((sender) => { try { pc.removeTrack(sender); } catch {} });
       } catch {}
     }
     setSharing(false);
@@ -582,27 +616,31 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
     setPeers((prev) => (prev[sid] ? { ...prev, [sid]: { ...prev[sid], volume: v } } : prev));
   };
 
+  const openCtx = (e, sid) => {
+    e.preventDefault();
+    setCtxMenu({ sid, x: Math.min(e.clientX, window.innerWidth - 220), y: Math.min(e.clientY, window.innerHeight - 160) });
+  };
+
   const entries = Object.entries(peers);
   const stagePeers = entries.filter(([, p]) => p.sharing && p.streams.length > 0);
-  const camPeers = entries.filter(([, p]) => !(p.sharing && p.streams.length > 0));
+  const voicePeers = entries.filter(([, p]) => !(p.sharing && p.streams.length > 0));
   const presenting = [
     ...(sharing ? ['Você'] : []),
     ...stagePeers.map(([, p]) => p.username),
   ];
   const anySharing = sharing || stagePeers.length > 0;
 
-  const camTile = (key, videoEl, name, isMuted, volCtl) => (
-    <div key={key} className="peer-tile">
-      {videoEl}
-      <div className="peer-bar">
-        <span className="peer-name">{name} {isMuted && <MicOff size={12} />}</span>
-        {volCtl}
-      </div>
+  const chip = (key, name, isMuted, ping, sid, speaking) => (
+    <div key={key} className="vchip" onContextMenu={sid ? (e) => openCtx(e, sid) : undefined} title={sid ? 'Botão direito: volume' : name}>
+      <Avatar name={name} size="sm" speaking={speaking} />
+      <span className="nm">{name}</span>
+      {isMuted ? <MicOff size={12} className="muted-ic" /> : <Mic size={12} className="unmuted-ic" />}
+      <Ping ms={ping} />
     </div>
   );
 
   return (
-    <div className="voice-room">
+    <div className="voice-room v2">
       {shareSources && (
         <div className="modal-bg" onClick={() => chooseShareSource(null)}>
           <div className="share-picker" onClick={(e) => e.stopPropagation()}>
@@ -622,16 +660,24 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
           </div>
         </div>
       )}
-      <h4>🔊 {channelName} — {status}
-        {sharing && hw === true && <span className="hw-badge on">⚡ HW 1080p60</span>}
+      <div className="vcall-bar">
+        <span className="live-dot" />
+        <b>Na call</b>
+        <span className="vcall-chan">#{channelName}</span>
+        <span className="vcall-status">{status}</span>
+        <Ping ms={ownPing} />
+        {sharing && hw === true && <span className="hw-badge on">⚡ HW</span>}
         {sharing && hw === false && <span className="hw-badge">SW</span>}
-      </h4>
+        <span className="vcall-count" title="Na call">{entries.length + 1}</span>
+        {onLeave && <button className="vcall-x" title="Sair da call" onClick={onLeave}><PhoneOff size={14} /></button>}
+      </div>
       {mediaNote && <div className="voice-note">{mediaNote}</div>}
 
       {anySharing ? (
         <>
-          <div className="present-banner">
-            <span className="live-dot" /> {presenting.join(', ')} {presenting.length > 1 ? 'estão' : 'está'} apresentando
+          <div className="present-hint">
+            <span className="live-tag static">AO VIVO</span>
+            {presenting.join(', ')} {presenting.length > 1 ? 'estão' : 'está'} apresentando
           </div>
           <div className="present">
             <div className="present-main">
@@ -659,100 +705,52 @@ export default function Voice({ channelId, channelName, socket, onLeave }) {
               ))}
             </div>
             <div className="present-side">
-              <div className="peer-tile mini local-tile">
-                <video ref={localRef} autoPlay muted playsInline style={{ display: hasCam ? undefined : 'none' }} />
-                {!hasCam && (
-                  <div className="peer-empty">
-                    <Avatar name="Você" size="md" />
-                    <small>sem câmera</small>
-                  </div>
-                )}
-                <div className="peer-bar">
-                  <span className="peer-name">Você {muted && <MicOff size={12} />}</span>
-                </div>
-              </div>
-              {camPeers.map(([sid, p]) => (
-                <div key={sid} className="peer-tile mini">
-                  {p.streams.length === 0 && (
-                    <div className="peer-empty">
-                      <span className="pulse"><Avatar name={p.username} size="md" /></span>
-                      <small>conectando...</small>
-                    </div>
-                  )}
-                  {p.streams.map((st) => (
-                    <PeerVideo key={st.id} stream={st} volume={p.volume} sinkId={outputDeviceId} />
-                  ))}
-                  <div className="peer-bar">
-                    <span className="peer-name">{p.username} {p.muted && <MicOff size={12} />}</span>
-                    <label className="vol" title={`Volume de ${p.username}`}>
-                      {p.volume === 0 ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                      <input
-                        type="range" min="0" max="100" value={Math.round(p.volume * 100)}
-                        onChange={(e) => setPeerVolume(sid, Number(e.target.value) / 100)}
-                      />
-                    </label>
-                  </div>
-                </div>
-              ))}
+              {chip('me', hasMic ? 'Você' : 'Você (ouvindo)', muted || deafened, ownPing, null, speakingSelf)}
+              {voicePeers.map(([sid, p]) => chip(sid, p.username, p.muted, p.ping, sid, speakingPeers[sid]))}
             </div>
           </div>
         </>
       ) : (
-        <>
-          <div className="stage-label">Câmeras ({camPeers.length + 1})</div>
-          <div className="cam-strip">
-            <div className="peer-tile local-tile">
-              <video ref={localRef} autoPlay muted playsInline style={{ display: hasCam ? undefined : 'none' }} />
-              {!hasCam && (
-                <div className="peer-empty">
-                  <Avatar name="Você" size="md" />
-                  <small>sem câmera</small>
-                </div>
-              )}
-              <div className="peer-bar">
-                <span className="peer-name">Você {muted && <MicOff size={12} />}</span>
-              </div>
-            </div>
-            {camPeers.map(([sid, p]) => (
-              <div key={sid} className="peer-tile">
-                {p.streams.length === 0 && (
-                  <div className="peer-empty">
-                    <span className="pulse"><Avatar name={p.username} size="md" /></span>
-                    <small>conectando...</small>
-                  </div>
-                )}
-                {p.streams.map((st) => (
-                  <PeerVideo key={st.id} stream={st} volume={p.volume} sinkId={outputDeviceId} />
-                ))}
-                <div className="peer-bar">
-                  <span className="peer-name">{p.username} {p.muted && <MicOff size={12} />}</span>
-                  <label className="vol" title={`Volume de ${p.username}`}>
-                    {p.volume === 0 ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                    <input
-                      type="range" min="0" max="100" value={Math.round(p.volume * 100)}
-                      onChange={(e) => setPeerVolume(sid, Number(e.target.value) / 100)}
-                    />
-                  </label>
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
+        <div className="vcall-chips">
+          {chip('me', hasMic ? 'Você' : 'Você (ouvindo)', muted || deafened, ownPing, null, speakingSelf)}
+          {voicePeers.map(([sid, p]) => chip(sid, p.username, p.muted, p.ping, sid, speakingPeers[sid]))}
+        </div>
       )}
 
-      <div className="voice-controls">
+      <div className="voice-controls slim">
         <button onClick={toggleMute} className={muted ? 'danger' : ''} title="Mutar/desmutar">
           {muted ? <MicOff size={15} /> : <Mic size={15} />} {muted ? 'Desmutar' : 'Mutar'}
+        </button>
+        <button onClick={toggleDeafen} className={deafened ? 'danger' : ''} title="Ensudecer (silencia tudo)">
+          <Headphones size={15} /> {deafened ? 'Ouvir' : 'Surdez'}
         </button>
         <label className="vol mic-vol" title="Volume de transmissão (microfone)">
           <Volume2 size={14} />
           <input type="range" min="0" max="150" value={micVol} onChange={(e) => changeMicVol(Number(e.target.value))} />
           <small>{micVol}%</small>
         </label>
-        <button onClick={toggleCam} title="Câmera">{camOff ? <VideoOff size={15} /> : <Video size={15} />} Câmera</button>
         <button onClick={toggleShare} title="Compartilhar tela">{sharing ? <MonitorOff size={15} /> : <MonitorUp size={15} />} {sharing ? 'Parar tela' : 'Tela'}</button>
         {onLeave && <button onClick={onLeave} className="danger" title="Sair da call"><PhoneOff size={15} /> Sair</button>}
       </div>
+      {ctxMenu && peers[ctxMenu.sid] && (
+        <>
+          <div className="ctx-overlay" onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }} />
+          <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+            <b>{peers[ctxMenu.sid].username}</b>
+            <label className="vol">
+              {peers[ctxMenu.sid].volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
+              <input
+                type="range" min="0" max="100" value={Math.round(peers[ctxMenu.sid].volume * 100)}
+                onChange={(e) => setPeerVolume(ctxMenu.sid, Number(e.target.value) / 100)}
+              />
+              <small>{Math.round(peers[ctxMenu.sid].volume * 100)}%</small>
+            </label>
+            <button onClick={() => { setPeerVolume(ctxMenu.sid, peers[ctxMenu.sid].volume === 0 ? 1 : 0); setCtxMenu(null); }}>
+              {peers[ctxMenu.sid].volume === 0 ? 'Ativar som' : 'Silenciar'}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

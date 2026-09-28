@@ -2,19 +2,29 @@
 const KEY = 'discordia_voice_settings';
 
 export const voiceDefaults = {
+  __v: 2,                 // versão das configs (migra sozinho)
   inputDeviceId: '',      // '' = padrão
   outputDeviceId: '',     // '' = padrão
   noiseSuppression: true, // redução de ruído
   echoCancellation: true, // cancelamento de eco
-  autoGain: true,          // ganho automático
+  autoGain: false,        // ganho automático do navegador (desligado: evita a voz abaixando sozinha)
   hwAccel: true,           // H.264 + alto desempenho na tela
   autoSens: true,          // sensibilidade automática (gate)
-  sensThreshold: 30,       // 0..100, abaixo disso o mic fecha
+  sensThreshold: 20,       // 0..100, abaixo disso o mic fecha
 };
 
 function load() {
   try {
-    return { ...voiceDefaults, ...(JSON.parse(localStorage.getItem(KEY)) || {}) };
+    const saved = JSON.parse(localStorage.getItem(KEY)) || {};
+    const base = { ...voiceDefaults, ...saved };
+    if (saved.__v !== 2) {
+      // migração: mantém dispositivos/HW, corrige o que causava voz oscilando
+      base.autoGain = false;
+      base.sensThreshold = 20;
+      base.__v = 2;
+      try { localStorage.setItem(KEY, JSON.stringify(base)); } catch {}
+    }
+    return base;
   } catch {
     return { ...voiceDefaults };
   }

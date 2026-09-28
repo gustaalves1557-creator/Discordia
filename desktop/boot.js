@@ -33,6 +33,16 @@ function srvDir() {
   return path.join(__dirname, 'srv');
 }
 
+// roda os logs se crescerem demais (evita comer disco com o tempo)
+function rotateLogs(userData) {
+  for (const [f, max] of [['boot.log', 512 * 1024], ['boot-error.log', 512 * 1024], ['pg.log', 2 * 1024 * 1024]]) {
+    try {
+      const p = path.join(userData, f);
+      if (fs.existsSync(p) && fs.statSync(p).size > max) fs.writeFileSync(p, '');
+    } catch {}
+  }
+}
+
 async function isReady(bin) {
   try {
     await run(path.join(bin, 'pg_isready.exe'), ['-h', 'localhost', '-p', String(PG_PORT)]);
@@ -88,6 +98,7 @@ async function boot(userData, onStatus) {
   const uploads = path.join(userData, 'uploads');
   fs.mkdirSync(pgdata, { recursive: true });
   fs.mkdirSync(uploads, { recursive: true });
+  rotateLogs(userData);
 
   // segredo JWT por máquina
   const secretFile = path.join(userData, 'jwt-secret');
