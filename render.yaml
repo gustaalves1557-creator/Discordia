@@ -9,10 +9,9 @@ services:
     dockerfilePath: ./server/Dockerfile
     plan: free
     healthCheckPath: /api/health
-    disk:
-      name: uploads
-      mountPath: /data
-      sizeGB: 1
+    # Sem disco no plano free (uploads apagam se o serviço reiniciar).
+    # P/ uploads permanentes: upgrade p/ Starter e adicione:
+    # disk: { name: uploads, mountPath: /data, sizeGB: 1 } + UPLOAD_DIR=/data/uploads
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -20,8 +19,6 @@ services:
           property: connectionString
       - key: JWT_SECRET
         generateValue: true
-      - key: UPLOAD_DIR
-        value: /data/uploads
       - key: NODE_ENV
         value: production
 
